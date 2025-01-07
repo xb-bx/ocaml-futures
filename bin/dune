@@ -1,0 +1,5 @@
+(executable
+ (public_name myfutures)
+ (name main)
+ ;(modes byte)
+ (libraries myfutures unix uring core ))
