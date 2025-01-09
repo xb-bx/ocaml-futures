@@ -38,33 +38,18 @@ and executionContext = { futures: (unit, unit) future list ref; queued_futures: 
 let enqueue_future ctx fut = 
     Cqueue.enqueue ctx.queued_futures fut
     
-let nextId ctx = 
+let next_id ctx = 
     let lastJob = ctx.lastJobId in
     lastJob := !lastJob + 1;
     !lastJob
 
 let ioaccept id fd addr res = 
     Sleeping(IOSleep({ id = id; fd = fd; typ = Accept(addr); result = res}))
-
 let iowrite id fd buf off res = 
     Sleeping(IOSleep({ id = id; fd = fd; typ = Write(buf, off); result = res}))
 let ioread id fd buf off res = 
     Sleeping(IOSleep({ id = id; fd = fd; typ = Read(buf, off); result = res}))
 
-let readFileFut file = 
-    let descr = Unix.openfile file [Unix.O_RDONLY] 0 in
-    let stat = Unix.fstat descr in  
-    let started = ref false in 
-    let buf = Cstruct.create stat.st_size in
-    let jobId = ref 0 in
-    let fut _ _ = 
-        match !started with 
-        | false -> 
-            ioread jobId descr buf (Optint.Int63.of_int 0) (ref 0)
-        | true -> 
-            Unix.close descr;
-            Finished(Cstruct.to_bytes buf)
-    in fut
     
 
 let delay x = 
@@ -83,7 +68,7 @@ let finished a: ('a, 'b) future =
     let fut _ _ =
         Finished a
     in fut
-let futureMap (trans: 'b -> 'c) (fut: ('a, 'b) future): ('a, 'c) future =
+let future_map (trans: 'b -> 'c) (fut: ('a, 'b) future): ('a, 'c) future =
     let futt input ctx =
         match fut input ctx with
         | Sleeping a -> Sleeping a
@@ -93,7 +78,7 @@ let futureMap (trans: 'b -> 'c) (fut: ('a, 'b) future): ('a, 'c) future =
             Finished b
     in futt
         
-let futureBind (fut: ('a, 'b) future) (f: 'b -> ('a, 'c) future): ('a, 'c) future = 
+let future_bind (fut: ('a, 'b) future) (f: 'b -> ('a, 'c) future): ('a, 'c) future = 
     let state = ref None in
     let ff input ctx = 
         match !state with 
@@ -110,33 +95,17 @@ let futureBind (fut: ('a, 'b) future) (f: 'b -> ('a, 'c) future): ('a, 'c) futur
     in ff
 
 
-let counter x = 
-    let i = ref 0 in
-    let fut (_) = 
-        match (!i) < x with
-        | true ->
-            i := (!i) + 1;
-            Pending
-        | false ->
-            Finished !i 
-    in fut
-
 
 let (let^) f a= 
-    let fut = (futureBind (f) (a)) in fut
+    let fut = (future_bind (f) (a)) in fut
 
         
-let futureDo f: ('a, 'b) future = 
+let future_do f: ('a, 'b) future = 
     let fut (x) (c: executionContext) = 
         f (c);
         Finished x
     in fut
-let isNotFinished x = 
-    match x with 
-    | Finished _ -> false
-    | Sleeping _ -> true
-    | Pending -> true
-let futureForeverLoop (bodyf) = 
+let future_forever_loop (bodyf) = 
     let state = ref false in
     let body = ref (bodyf ()) in
     let fut input ctx = 
@@ -148,7 +117,7 @@ let futureForeverLoop (bodyf) =
         | Sleeping s -> Sleeping s
         | Pending -> Pending
     in fut
-let futureLoop (cond) (bodyf) = 
+let future_loop (cond) (bodyf) = 
     let state = ref false in
     let body = ref (bodyf ()) in
     let fut input ctx = 
@@ -171,10 +140,6 @@ let futureLoop (cond) (bodyf) =
             | Pending -> Pending
     in fut
 
-let readText file =
-    let^ bytes = readFileFut file in 
-    (Bytes.to_string bytes) |> print_endline;
-    finished ()
 let sleeper_time sleepr = 
     match sleepr with 
     | TimeSleep (st, ms) -> (st,ms)
@@ -228,19 +193,19 @@ let wait t u =
     
 let enqueue_fut f = 
     let fut input ctx = 
-        enqueue_future ctx (f |> futureMap (fun _ -> ()));
+        enqueue_future ctx (f |> future_map (fun _ -> ()));
         Finished input
     in fut
 
 let get_ctx = 
-    let fut input ctx = 
+    let fut _ ctx = 
         Finished ctx
     in fut
 let uring_read fd buf = 
     let started = ref false in 
     let jobid = ref 0 in 
     let read = ref 0 in
-    let fut _ ctx = 
+    let fut _ _ = 
         match !started with
         | false -> 
             started := true;
@@ -252,7 +217,7 @@ let uring_write fd buf =
     let started = ref false in 
     let wrote = ref 0 in
     let jobid = ref 0 in 
-    let fut _ ctx = 
+    let fut _ _ = 
         match !started with
         | false -> 
             started := true;
@@ -266,7 +231,7 @@ let uring_accept socket addr =
     let started = ref false in
     let ressocket = ref 0 in
     let jobid = ref 0 in
-    let fut input ctx = 
+    let fut _ _ = 
         match !started with  
         | false -> 
             started := true;
@@ -274,7 +239,7 @@ let uring_accept socket addr =
         | true -> 
             Finished !(ressocket)
     in fut
-let readFile file = 
+let read_file file = 
     let opencatch filik =
         try 
             let f = Unix.openfile filik [Unix.O_RDONLY] 0 in
@@ -297,7 +262,7 @@ let readFile file =
 
 let submit_ioreq ctx ioreq = 
     let uring = ctx.uring in 
-    ioreq.id := nextId ctx;
+    ioreq.id := next_id ctx;
     match ioreq.typ with 
     | Read(buf, off) -> 
         Uring.read uring ~file_offset:off ioreq.fd buf !(ioreq.id)
@@ -307,7 +272,6 @@ let submit_ioreq ctx ioreq =
         Uring.accept uring ioreq.fd addr !(ioreq.id)
 
 let worker ctx = 
-    let id = Thread.id (Thread.self()) in
     let futs = ctx.futures in
     while true do 
         let io_sleeping = !(ctx.io_sleeping) in 
@@ -340,7 +304,6 @@ let worker ctx =
             c:= false;
             (match wait_for_uring ctx.uring with 
             | Some({result = r; data=id}) -> 
-                (*print_endline "abobabobp";*)
                 let sleept = !next_sleeping_io |> List.find (fun ((_, i)) -> !((i).id) = id)  in
                 let result_ref = (snd sleept).result in  
                 result_ref := r;
@@ -364,13 +327,10 @@ let worker ctx =
                 next_sleeping_time := !(next_sleeping_time) |> List.filter (fun ((_, t)) -> let (st, st_ms) = (t) in st <> start || st_ms <> ms))
             else 
                 ()
-            
         done;
-            (*print_endline "1.5";*)
         for i = 0 to (List.length futures) - 1 do 
             let fut = List.nth futures i in
             let res = fut () ctx in
-            (*ppfutres res;*)
             match res with 
             | Finished _ -> 
                 ()
@@ -384,30 +344,18 @@ let worker ctx =
                 next_sleeping_time := (fut, (start, ms)) :: !next_sleeping_time ;
             ;
         done;
-        let s = Uring.submit ctx.uring in
-        (*Printf.printf "submit = %i %i\n" s (!next_sleeping_io |> List.length) ;*)
-        (*flush_all();*)
-
+        let _ = Uring.submit ctx.uring in
         let io_slps = ctx.io_sleeping in
         let time_slps = ctx.time_sleeping in
-        let que = ctx.queued_futures in
         futs := !next_futures;
 
         io_slps := !next_sleeping_io;
         time_slps := !next_sleeping_time;
 
-            (*print_endline "2";*)
         if (List.length futures) = 0 && (List.length !next_sleeping_io) = 0 && (List.length !next_sleeping_time) > 0 then 
             let timeout = find_minimal_timeout !next_sleeping_time in
             sleepf timeout
         else 
             ();
-        (*print_endline "3";*)
             ;
     done 
-
-
-    
-    (*main ()*)
-    
-
